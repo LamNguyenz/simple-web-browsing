@@ -33,13 +33,14 @@ class URL:
         request += f"Host: {self.host}\r\n"
         request += "\r\n"
         s.send(request.encode("utf8"))
+
         response = s.makefile("r", encoding="utf8", newline="\r\n")
 
         status_line = response.readline()
         version, status, explanation = status_line.split(" ", 2)
 
         headers = {}
-        headers['status'] = status
+        headers["status"] = status
         while True:
             line = response.readline()
             if line == "\r\n":
@@ -55,7 +56,8 @@ class URL:
         return headers, body
 
 
-def show(body):
+def lex(body):
+    text = ""
     in_tag = False
     for c in body:
         if c == "<":
@@ -63,32 +65,59 @@ def show(body):
         elif c == ">":
             in_tag = False
         elif not in_tag:
-            print(c, end="")
-
-
-def load(url):
-    headers, body = url.request()
-    show(body)
+            text += c
+    return text
 
 
 WIDTH, HEIGHT = 800, 600
+H_STEP, V_STEP = 13, 18
+SCROLL_STEP = 100
 
 
 class Browser:
     def __init__(self):
         self.window = tkinter.Tk()
+        self.window.title("Web Browser")
         self.canvas = tkinter.Canvas(self.window, width=WIDTH, height=HEIGHT)
         self.canvas.pack()
 
+        self.scroll = 0
+        self.window.bind("<Down>", self.scrolldown)
+
+    def layout(self, text):
+        display_list = []
+        cursor_x, cursor_y = H_STEP, V_STEP
+        for c in text:
+            display_list.append((cursor_x, cursor_y, c))
+            cursor_x += H_STEP
+            if cursor_x >= WIDTH - H_STEP:
+                cursor_y += V_STEP
+                cursor_x = H_STEP
+        return display_list
+
+    def draw(self):
+        self.canvas.delete("all")
+        for x, y, c in self.display_list:
+            if y > self.scroll + HEIGHT:
+                continue
+            if y + V_STEP < self.scroll:
+                continue
+            self.canvas.create_text(x, y - self.scroll, text=c)
+
     def load(self, url):
-        self.canvas.create_rectangle(10, 20, 400, 300)
-        self.canvas.create_oval(100, 100, 150, 150)
-        self.canvas.create_text(200, 150, text="Hi")
+        headers, body = url.request()
+        text = lex(body)
+        self.display_list = self.layout(text)
+        self.draw()
+
+    def scrolldown(self, e):
+        self.scroll += SCROLL_STEP
+        self.draw()
 
 
 if __name__ == "__main__":
     import sys
-    
+
     browser = Browser()
     browser.load(URL(sys.argv[1]))
     tkinter.mainloop()
