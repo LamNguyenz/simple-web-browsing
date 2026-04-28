@@ -1,6 +1,7 @@
 import socket
 import ssl
 import tkinter
+import tkinter.font
 
 
 class URL:
@@ -31,6 +32,7 @@ class URL:
 
         request = f"GET {self.path} HTTP/1.0\r\n"
         request += f"Host: {self.host}\r\n"
+        request += "User-Agent: Browser - version\r\n"
         request += "\r\n"
         s.send(request.encode("utf8"))
 
@@ -38,6 +40,7 @@ class URL:
 
         status_line = response.readline()
         version, status, explanation = status_line.split(" ", 2)
+        assert status == "200", "{}: {}".format(status, explanation)
 
         headers = {}
         headers["status"] = status
@@ -84,31 +87,32 @@ class Browser:
         self.scroll = 0
         self.window.bind("<Down>", self.scrolldown)
 
+    def load(self, url: URL):
+        _, body = url.request()
+        text = lex(body)
+        self.display_list = self.layout(text)
+        self.draw()
+
     def layout(self, text):
         display_list = []
+        font = tkinter.font.Font(size=16)
         cursor_x, cursor_y = H_STEP, V_STEP
-        for c in text:
-            display_list.append((cursor_x, cursor_y, c))
-            cursor_x += H_STEP
-            if cursor_x >= WIDTH - H_STEP:
-                cursor_y += V_STEP
+        for word in text.split():
+            print((word, cursor_x))
+            w = font.measure(word)
+            if cursor_x + w > WIDTH - H_STEP:
+                cursor_y += font.metrics("linespace") * 1.25
                 cursor_x = H_STEP
+            display_list.append((cursor_x, cursor_y, word, font))
+            cursor_x += w + font.measure(" ")
         return display_list
 
     def draw(self):
         self.canvas.delete("all")
-        for x, y, c in self.display_list:
-            if y > self.scroll + HEIGHT:
+        for x, y, c, font in self.display_list:
+            if y > self.scroll + HEIGHT or y + V_STEP < self.scroll:
                 continue
-            if y + V_STEP < self.scroll:
-                continue
-            self.canvas.create_text(x, y - self.scroll, text=c)
-
-    def load(self, url):
-        headers, body = url.request()
-        text = lex(body)
-        self.display_list = self.layout(text)
-        self.draw()
+            self.canvas.create_text(x, y - self.scroll, text=c, font=font, anchor="nw")
 
     def scrolldown(self, e):
         self.scroll += SCROLL_STEP
