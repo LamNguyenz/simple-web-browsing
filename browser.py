@@ -59,22 +59,106 @@ class URL:
         return headers, body
 
 
+class Text:
+    def __init__(self, text):
+        self.text = text
+
+
+class Tag:
+    def __init__(self, tag) -> None:
+        self.tag = tag
+
+
 def lex(body):
-    text = ""
+    out = []
+    buffer = ""
     in_tag = False
     for c in body:
         if c == "<":
             in_tag = True
+            if buffer:
+                out.append(Text(buffer))
+                buffer = ""
         elif c == ">":
             in_tag = False
-        elif not in_tag:
-            text += c
-    return text
+            out.append(Tag(buffer))
+            buffer = ""
+        else:
+            buffer += c
+    if not in_tag and buffer:
+        out.append(Text(buffer))
+    return out
 
 
 WIDTH, HEIGHT = 800, 600
 H_STEP, V_STEP = 13, 18
 SCROLL_STEP = 100
+
+
+class Layout:
+    def __init__(self, tokens) -> None:
+        self.tokens = tokens
+        self.display_list = []
+        self.cursor_x = H_STEP
+        self.cursor_y = V_STEP
+        self.weight = "normal"
+        self.style = "roman"
+        self.size = 16
+
+        self.line = []
+        for tok in tokens:
+            self.token(tok)
+        self.flush()
+
+    def token(self, tok):
+        if isinstance(tok, Text):
+            self.text(tok.text)
+        elif tok.tag == "i":
+            self.style = "italic"
+        elif tok.tag == "/i":
+            self.style = "roman"
+        elif tok.tag == "b":
+            self.weight = "bold"
+        elif tok.tag == "/b":
+            self.weight = "normal"
+        elif tok.tag == "small":
+            self.size -= 2
+        elif tok.tag == "/small":
+            self.size += 2
+        elif tok.tag == "big":
+            self.size += 4
+        elif tok.tag == "/big":
+            self.size -= 4
+        elif tok.tag == "br":
+            self.flush()
+        elif tok.tag == "/p":
+            self.flush()
+            self.cursor_y += V_STEP
+
+    def text(self, text):
+        font = tkinter.font.Font(size=self.size, weight=self.weight, slant=self.style)
+        for word in text.split():
+            w = font.measure(word)
+            if self.cursor_x + w > WIDTH - H_STEP:
+                self.flush()
+                self.cursor_y += font.metrics("linespace") * 1.25
+                self.cursor_x = H_STEP
+            self.line.append((self.cursor_x, word, font))
+            self.cursor_x += w + font.measure(" ")
+
+    def flush(self):
+        if not self.line:
+            return
+        metrics = [font.metrics() for x, word, font in self.line]
+        max_ascent = max([metric["ascent"] for metric in metrics])
+        baseline = self.cursor_y + 1.25 * max_ascent
+        for x, word, font in self.line:
+            y = baseline - font.metrics("ascent")
+            self.display_list.append((x, y, word, font))
+        self.cursor_x = H_STEP
+        self.line = []
+        max_descent = max([metric["descent"] for metric in metrics])
+        self.cursor_y = baseline + 1.2 * max_descent
 
 
 class Browser:
@@ -89,23 +173,9 @@ class Browser:
 
     def load(self, url: URL):
         _, body = url.request()
-        text = lex(body)
-        self.display_list = self.layout(text)
+        tokens = lex(body)
+        self.display_list = Layout(tokens).display_list
         self.draw()
-
-    def layout(self, text):
-        display_list = []
-        font = tkinter.font.Font(size=16)
-        cursor_x, cursor_y = H_STEP, V_STEP
-        for word in text.split():
-            print((word, cursor_x))
-            w = font.measure(word)
-            if cursor_x + w > WIDTH - H_STEP:
-                cursor_y += font.metrics("linespace") * 1.25
-                cursor_x = H_STEP
-            display_list.append((cursor_x, cursor_y, word, font))
-            cursor_x += w + font.measure(" ")
-        return display_list
 
     def draw(self):
         self.canvas.delete("all")
