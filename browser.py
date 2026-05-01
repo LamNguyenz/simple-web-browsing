@@ -1,5 +1,6 @@
 import socket
 import ssl
+import time
 import tkinter
 import tkinter.font
 
@@ -56,38 +57,167 @@ class URL:
 
         body = response.read()
         s.close()
+
         return headers, body
 
 
 class Text:
-    def __init__(self, text):
+    def __init__(self, text, parent) -> None:
         self.text = text
+        self.children = []
+        self.parent = parent
+
+    def __repr__(self) -> str:
+        return repr(self.text)
 
 
-class Tag:
-    def __init__(self, tag) -> None:
+class Element:
+    def __init__(self, tag, parent, attributes) -> None:
         self.tag = tag
+        self.children = []
+        self.parent = parent
+        self.attributes = attributes
+
+    def __repr__(self) -> str:
+        return "<" + self.tag + ">"
 
 
-def lex(body):
-    out = []
-    buffer = ""
-    in_tag = False
-    for c in body:
-        if c == "<":
-            in_tag = True
-            if buffer:
-                out.append(Text(buffer))
-                buffer = ""
-        elif c == ">":
-            in_tag = False
-            out.append(Tag(buffer))
-            buffer = ""
-        else:
-            buffer += c
-    if not in_tag and buffer:
-        out.append(Text(buffer))
-    return out
+def print_tree(node, indent=0, file=None):
+    if file is None:
+        file = open("result.txt", "w")
+        should_close = True
+    else:
+        should_close = False
+
+    file.write(" " * indent + str(node) + "\n")
+    for child in node.children:
+        print_tree(child, indent + 2, file)
+
+    if should_close:
+        file.close()
+
+
+class HTMLParser:
+    SELF_CLOSING_TAG = [
+        "area",
+        "base",
+        "br",
+        "col",
+        "embed",
+        "hr",
+        "img",
+        "input",
+        "link",
+        "meta",
+        "param",
+        "source",
+        "track",
+        "wbr",
+    ]
+    HEAD_TAGS = [
+        "base",
+        "basefont",
+        "bgsound",
+        "noscript",
+        "link",
+        "meta",
+        "title",
+        "style",
+        "script",
+    ]
+
+    def __init__(self, body) -> None:
+        self.body = body
+        self.unfinished = []
+
+    def parse(self):
+        text = ""
+        in_tag = False
+        for c in self.body:
+            if c == "<":
+                in_tag = True
+                if text:
+                    self.add_text(text)
+                text = ""
+            elif c == ">":
+                in_tag = False
+                self.add_tag(text)
+                text = ""
+            else:
+                text += c
+        if not in_tag and text:
+            self.add_text(text)
+        return self.finish()
+
+    def get_parent(self):
+        return self.unfinished[-1] if self.unfinished else None
+
+    def add_text(self, text):
+        if text.isspace():
+            return
+        self.implicit_tags(None)
+        parent = self.get_parent()
+        node = Text(text, parent)
+        parent.children.append(node)
+
+    def add_tag(self, tagEl):
+        tag, attributes = self.get_attributes(tagEl)
+        if tag.startswith("!"):
+            return
+        self.implicit_tags(tag)
+
+        if tag.startswith("/"):
+            if len(self.unfinished) == 1:
+                return
+            node = self.unfinished.pop()
+            parent = self.get_parent()
+            if parent:
+                parent.children.append(node)
+        elif tag in self.SELF_CLOSING_TAG:
+            parent = self.get_parent()
+            node = Element(tag, parent, attributes)
+            parent.children.append(node)
+        else:  # the normal tag
+            parent = self.get_parent()
+            node = Element(tag, parent, attributes)
+            self.unfinished.append(node)
+
+    def get_attributes(self, text):
+        parts = text.split()
+        tag = parts[0].casefold()
+        attributes = {}
+        for attrpair in parts[1:]:
+            if "=" in attrpair:
+                key, value = attrpair.split("=", 1)
+                attributes[key.casefold()] = value
+            else:
+                attributes[attrpair.casefold()] = ""
+        return tag, attributes
+
+    def finish(self):
+        while len(self.unfinished) > 1:
+            node = self.unfinished.pop()
+            parent = self.get_parent()
+            if parent:
+                parent.children.append(node)
+        return self.unfinished.pop()
+
+    def implicit_tags(self, tag):
+        while True:
+            open_tags = [node.tag for node in self.unfinished]
+            if open_tags == [] and tag != "html":
+                self.add_tag("html")
+            elif open_tags == ["html"] and tag not in ["head", "body", "/html"]:
+                if tag in self.HEAD_TAGS:
+                    self.add_tag("head")
+                else:
+                    self.add_tag("body")
+            elif (
+                open_tags == ["html", "head"] and tag not in ["/head"] + self.HEAD_TAGS
+            ):
+                self.add_tag("/head")
+            else:
+                break
 
 
 WIDTH, HEIGHT = 800, 600
@@ -96,8 +226,7 @@ SCROLL_STEP = 100
 
 
 class Layout:
-    def __init__(self, tokens) -> None:
-        self.tokens = tokens
+    def __init__(self, tree) -> None:
         self.display_list = []
         self.cursor_x = H_STEP
         self.cursor_y = V_STEP
@@ -106,34 +235,42 @@ class Layout:
         self.size = 16
 
         self.line = []
-        for tok in tokens:
-            self.token(tok)
-        self.flush()
+        self.recurse(tree)
 
-    def token(self, tok):
-        if isinstance(tok, Text):
-            self.text(tok.text)
-        elif tok.tag == "i":
+    def open_tag(self, tag):
+        if tag == "i":
             self.style = "italic"
-        elif tok.tag == "/i":
-            self.style = "roman"
-        elif tok.tag == "b":
+        elif tag == "b":
             self.weight = "bold"
-        elif tok.tag == "/b":
-            self.weight = "normal"
-        elif tok.tag == "small":
+        elif tag == "small":
             self.size -= 2
-        elif tok.tag == "/small":
-            self.size += 2
-        elif tok.tag == "big":
+        elif tag == "big":
             self.size += 4
-        elif tok.tag == "/big":
-            self.size -= 4
-        elif tok.tag == "br":
+        elif tag == "br":
             self.flush()
-        elif tok.tag == "/p":
+
+    def close_tag(self, tag):
+        if tag == "i":
+            self.style = "roman"
+        elif tag == "b":
+            self.weight = "normal"
+        elif tag == "small":
+            self.size += 2
+        elif tag == "big":
+            self.size -= 4
+        elif tag == "p":
             self.flush()
             self.cursor_y += V_STEP
+
+    def recurse(self, tree):
+        if isinstance(tree, Text):
+            for word in tree.text.split():
+                self.text(word)
+        else:
+            self.open_tag(tree.tag)
+            for child in tree.children:
+                self.recurse(child)
+            self.close_tag(tree.tag)
 
     def text(self, text):
         font = tkinter.font.Font(size=self.size, weight=self.weight, slant=self.style)
@@ -171,11 +308,17 @@ class Browser:
         self.scroll = 0
         self.window.bind("<Down>", self.scrolldown)
 
-    def load(self, url: URL):
+    def load(self, url):
+        start_time = time.time()
+        if not isinstance(url, URL):
+            url = URL(url)
         _, body = url.request()
-        tokens = lex(body)
-        self.display_list = Layout(tokens).display_list
+        self.nodes = HTMLParser(body).parse()
+        self.display_list = Layout(self.nodes).display_list
         self.draw()
+        draw_time = time.time()
+
+        print(f"Total time: {draw_time - start_time:.3f}s")
 
     def draw(self):
         self.canvas.delete("all")
@@ -193,5 +336,8 @@ if __name__ == "__main__":
     import sys
 
     browser = Browser()
-    browser.load(URL(sys.argv[1]))
+    browser.load(sys.argv[1])
     tkinter.mainloop()
+    # headers, body = URL(sys.argv[1]).request()
+    # nodes = HTMLParser(body).parse()
+    # print_tree(nodes)
