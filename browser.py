@@ -158,7 +158,8 @@ class HTMLParser:
         self.implicit_tags(None)
         parent = self.get_parent()
         node = Text(text, parent)
-        parent.children.append(node)
+        if parent:
+            parent.children.append(node)
 
     def add_tag(self, tagEl):
         tag, attributes = self.get_attributes(tagEl)
@@ -176,7 +177,8 @@ class HTMLParser:
         elif tag in self.SELF_CLOSING_TAG:
             parent = self.get_parent()
             node = Element(tag, parent, attributes)
-            parent.children.append(node)
+            if parent:
+                parent.children.append(node)
         else:  # the normal tag
             parent = self.get_parent()
             node = Element(tag, parent, attributes)
@@ -225,17 +227,158 @@ H_STEP, V_STEP = 13, 18
 SCROLL_STEP = 100
 
 
-class Layout:
-    def __init__(self, tree) -> None:
+class DocumentLayout:
+    def __init__(self, node) -> None:
+        self.node = node
+        self.parent = None
+        self.previous = None
+        self.children = []
+
+    def layout(self):
+        child = BlockLayout(self.node, self, None)
+        self.children.append(child)
+        child.layout()
+
+    def paint(self):
+        return []
+
+
+class DrawText:
+    def __init__(self, x1, y1, text, font) -> None:
+        self.left = x1
+        self.top = y1
+        self.text = text
+        self.font = font
+
+
+class DrawRect:
+    def __init__(self, x1, y1, x2, y2, color) -> None:
+        self.top = y1
+        self.left = x1
+        self.bottom = y2
+        self.right = x2
+        self.color = color
+
+
+BLOCK_ELEMENTS = [
+    "html",
+    "body",
+    "article",
+    "section",
+    "nav",
+    "aside",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "hgroup",
+    "header",
+    "footer",
+    "address",
+    "p",
+    "hr",
+    "ol",
+    "ul",
+    "menu",
+    "li",
+    "dl",
+    "dt",
+    "dd",
+    "figure",
+    "figcaption",
+    "main",
+    "div",
+    "table",
+    "form",
+    "fieldset",
+    "legend",
+    "details",
+    "summary",
+]
+
+
+def layout_mode(self):
+    if isinstance(self.node, Text):
+        return "inline"
+    elif self.node.children:
+        for child in self.node.children:
+            if isinstance(child, Text):
+                continue
+            if child.tag in BLOCK_ELEMENTS:
+                return "block"
+        return "inline"
+    else:
+        return "block"
+
+
+class BlockLayout:
+    def __init__(self, node, parent, previous) -> None:
+        self.node = node
+        self.parent = parent
+        self.previous = previous
+        self.children = []
+
+        self.width = None
+        self.height = None
+
+    def layout(self):
+        previous = None
+        for child in self.node.children:
+            if layout_mode(child) == "inline":
+                next = InlineLayout(child, self, previous)
+            else:
+                next = BlockLayout(child, self, previous)
+            self.children.append(next)
+            previous = next
+
+        self.width = self.parent.width
+        self.x = self.parent.x
+
+        if self.previous:
+            self.y = self.previous.y + self.previous.height
+        else:
+            self.y = self.parent.y
+
+        for child in self.children:
+            child.layout()
+
+        self.height = sum([child.height for child in self.children])
+
+    def paint(self, display_list):
+        if self.node.tag == "pre":
+            x2, y2 = self.x + self.width, self.y + self.height
+            rect = DrawRect(self.x, self.y, x2, y2, "gray")
+            display_list.append(rect)
+        for child in self.children:
+            child.draw(display_list)
+
+
+class InlineLayout:
+    def __init__(self, node, parent, previous) -> None:
+        self.node = node
+        self.parent = parent
+        self.previous = previous
+        self.chidlren = []
+
+    def layout(self):
+        self.width = self.parent.width
+        self.x = self.parent.x
+
+        if self.previous:
+            self.y = self.previous.y + self.previous.height
+        else:
+            self.y = self.parent.y
+
         self.display_list = []
-        self.cursor_x = H_STEP
-        self.cursor_y = V_STEP
         self.weight = "normal"
         self.style = "roman"
         self.size = 16
 
+        self.cursor_x = self.x
+        self.cursor_y = self.y
         self.line = []
-        self.recurse(tree)
 
     def open_tag(self, tag):
         if tag == "i":
@@ -286,7 +429,7 @@ class Layout:
     def flush(self):
         if not self.line:
             return
-        metrics = [font.metrics() for x, word, font in self.line]
+        metrics = [font.metrics() for _, _, font in self.line]
         max_ascent = max([metric["ascent"] for metric in metrics])
         baseline = self.cursor_y + 1.25 * max_ascent
         for x, word, font in self.line:
@@ -312,9 +455,12 @@ class Browser:
         start_time = time.time()
         if not isinstance(url, URL):
             url = URL(url)
+
         _, body = url.request()
-        self.nodes = HTMLParser(body).parse()
-        self.display_list = Layout(self.nodes).display_list
+        nodes = HTMLParser(body).parse()
+        self.document = DocumentLayout(nodes)
+        self.document.layout()
+        self.display_list = []
         self.draw()
         draw_time = time.time()
 
