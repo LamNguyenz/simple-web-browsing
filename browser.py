@@ -3,12 +3,23 @@ import ssl
 import time
 import tkinter
 import tkinter.font
+from pathlib import Path
 
 
 class URL:
     def __init__(self, url) -> None:
+        self.source = url
+        if "://" not in url:
+            self.scheme = "file"
+            self.path = str(Path(url).expanduser())
+            return
+
         self.scheme, url = url.split("://", 1)
-        assert self.scheme in ["http", "https"]
+        assert self.scheme in ["http", "https", "file"]
+
+        if self.scheme == "file":
+            self.path = str(Path(url).expanduser())
+            return
 
         self.port = 80 if self.scheme == "http" else 443
 
@@ -22,6 +33,11 @@ class URL:
             self.port = int(port)
 
     def request(self):
+        if self.scheme == "file":
+            with open(self.path, "r", encoding="utf8") as f:
+                body = f.read()
+            return {"status": "200"}, body
+
         s = socket.socket(
             family=socket.AF_INET, type=socket.SOCK_STREAM, proto=socket.IPPROTO_TCP
         )
