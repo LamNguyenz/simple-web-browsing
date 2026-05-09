@@ -113,6 +113,18 @@ def print_tree(node, indent=0, file=None):
         file.close()
 
 
+def print_nodes(node, indent=0, file=None):
+    if isinstance(node, DocumentLayout):
+        print("Document")
+    elif isinstance(node, BlockLayout):
+        print("Block")
+    elif isinstance(node, InlineLayout):
+        print("Inline")
+    if node.children:
+        for child in node.children:
+            print_nodes(child, indent + 2, file)
+
+
 class HTMLParser:
     SELF_CLOSING_TAG = [
         "area",
@@ -221,6 +233,7 @@ class HTMLParser:
         return self.unfinished.pop()
 
     def implicit_tags(self, tag):
+        """Add default tag"""
         while True:
             open_tags = [node.tag for node in self.unfinished]
             if open_tags == [] and tag != "html":
@@ -241,40 +254,6 @@ class HTMLParser:
 WIDTH, HEIGHT = 800, 600
 H_STEP, V_STEP = 13, 18
 SCROLL_STEP = 100
-
-
-class DocumentLayout:
-    def __init__(self, node) -> None:
-        self.node = node
-        self.parent = None
-        self.previous = None
-        self.children = []
-
-    def layout(self):
-        child = BlockLayout(self.node, self, None)
-        self.children.append(child)
-        child.layout()
-
-    def paint(self):
-        return []
-
-
-class DrawText:
-    def __init__(self, x1, y1, text, font) -> None:
-        self.left = x1
-        self.top = y1
-        self.text = text
-        self.font = font
-
-
-class DrawRect:
-    def __init__(self, x1, y1, x2, y2, color) -> None:
-        self.top = y1
-        self.left = x1
-        self.bottom = y2
-        self.right = x2
-        self.color = color
-
 
 BLOCK_ELEMENTS = [
     "html",
@@ -315,11 +294,11 @@ BLOCK_ELEMENTS = [
 ]
 
 
-def layout_mode(self):
-    if isinstance(self.node, Text):
+def layout_mode(node):
+    if isinstance(node, Text):
         return "inline"
-    elif self.node.children:
-        for child in self.node.children:
+    elif node.children:
+        for child in node.children:
             if isinstance(child, Text):
                 continue
             if child.tag in BLOCK_ELEMENTS:
@@ -335,9 +314,6 @@ class BlockLayout:
         self.parent = parent
         self.previous = previous
         self.children = []
-
-        self.width = None
-        self.height = None
 
     def layout(self):
         previous = None
@@ -362,13 +338,15 @@ class BlockLayout:
 
         self.height = sum([child.height for child in self.children])
 
-    def paint(self, display_list):
+    def getDraw(self):
+        display_list = []
         if self.node.tag == "pre":
             x2, y2 = self.x + self.width, self.y + self.height
             rect = DrawRect(self.x, self.y, x2, y2, "gray")
             display_list.append(rect)
         for child in self.children:
-            child.draw(display_list)
+            display_list.extend(child.getDraw())
+        return tuple(display_list)
 
 
 class InlineLayout:
@@ -376,7 +354,7 @@ class InlineLayout:
         self.node = node
         self.parent = parent
         self.previous = previous
-        self.chidlren = []
+        self.children = []
 
     def layout(self):
         self.width = self.parent.width
@@ -395,6 +373,10 @@ class InlineLayout:
         self.cursor_x = self.x
         self.cursor_y = self.y
         self.line = []
+        self.recurse(self.node)
+        self.flush()
+
+        self.height = self.cursor_y - self.y
 
     def open_tag(self, tag):
         if tag == "i":
@@ -421,16 +403,6 @@ class InlineLayout:
             self.flush()
             self.cursor_y += V_STEP
 
-    def recurse(self, tree):
-        if isinstance(tree, Text):
-            for word in tree.text.split():
-                self.text(word)
-        else:
-            self.open_tag(tree.tag)
-            for child in tree.children:
-                self.recurse(child)
-            self.close_tag(tree.tag)
-
     def text(self, text):
         font = tkinter.font.Font(size=self.size, weight=self.weight, slant=self.style)
         for word in text.split():
@@ -442,19 +414,96 @@ class InlineLayout:
             self.line.append((self.cursor_x, word, font))
             self.cursor_x += w + font.measure(" ")
 
+    def recurse(self, tree):
+        if isinstance(tree, Text):
+            for word in tree.text.split():
+                self.text(word)
+        else:
+            self.open_tag(tree.tag)
+            for child in tree.children:
+                self.recurse(child)
+            self.close_tag(tree.tag)
+
     def flush(self):
         if not self.line:
             return
         metrics = [font.metrics() for _, _, font in self.line]
         max_ascent = max([metric["ascent"] for metric in metrics])
-        baseline = self.cursor_y + 1.25 * max_ascent
+        baseline = self.cursor_y + 1.2 * max_ascent
         for x, word, font in self.line:
             y = baseline - font.metrics("ascent")
             self.display_list.append((x, y, word, font))
-        self.cursor_x = H_STEP
+        self.cursor_x = self.x
         self.line = []
         max_descent = max([metric["descent"] for metric in metrics])
         self.cursor_y = baseline + 1.2 * max_descent
+
+    def getDraw(self):
+        return tuple(
+            DrawText(x, y, word, font) for x, y, word, font in self.display_list
+        )
+
+
+class DocumentLayout:
+    def __init__(self, node) -> None:
+        self.node = node
+        self.parent = None
+        self.previous = None
+        self.children = []
+
+        self.width = WIDTH - 2 * H_STEP
+        self.x = H_STEP
+        self.y = V_STEP
+
+    def layout(self):
+        child = BlockLayout(self.node, self, None)
+        self.children.append(child)
+
+        child.layout()
+        self.height = child.height + 2 * V_STEP
+
+    def getDraw(self):
+        display_list = []
+        for child in self.children:
+            display_list.extend(child.getDraw())
+        return tuple(display_list)
+
+
+class DrawText:
+    def __init__(self, x1, y1, text, font) -> None:
+        self.left = x1
+        self.top = y1
+        self.text = text
+        self.font = font
+        self.bottom = y1 + font.metrics("linespace")
+
+    def execute(self, canvas, scroll):
+        canvas.create_text(
+            self.left,
+            self.top - scroll,
+            text=self.text,
+            font=self.font,
+            anchor="nw",
+        )
+
+
+class DrawRect:
+    def __init__(self, x1, y1, x2, y2, color) -> None:
+        self.top = y1
+        self.left = x1
+        self.bottom = y2
+        self.right = x2
+        self.color = color
+
+    def execute(self, canvas, scroll):
+        canvas.create_rectangle(
+            self.left,
+            self.top - scroll,
+            self.right,
+            self.bottom - scroll,
+            width=0,
+            fill=self.color,
+        )
 
 
 class Browser:
@@ -466,6 +515,7 @@ class Browser:
 
         self.scroll = 0
         self.window.bind("<Down>", self.scrolldown)
+        self.display_list = []
 
     def load(self, url):
         start_time = time.time()
@@ -474,24 +524,28 @@ class Browser:
 
         _, body = url.request()
         nodes = HTMLParser(body).parse()
+
         self.document = DocumentLayout(nodes)
         self.document.layout()
-        self.display_list = []
-        self.draw()
-        draw_time = time.time()
+        self.display_list = self.document.getDraw()
+        self.render()
 
+        draw_time = time.time()
         print(f"Total time: {draw_time - start_time:.3f}s")
 
-    def draw(self):
+    def render(self):
         self.canvas.delete("all")
-        for x, y, c, font in self.display_list:
-            if y > self.scroll + HEIGHT or y + V_STEP < self.scroll:
+        for cmd in self.display_list:
+            if cmd.top > self.scroll + HEIGHT:
                 continue
-            self.canvas.create_text(x, y - self.scroll, text=c, font=font, anchor="nw")
+            if cmd.bottom < self.scroll:
+                continue
+            cmd.execute(self.canvas, self.scroll)
 
     def scrolldown(self, e):
-        self.scroll += SCROLL_STEP
-        self.draw()
+        max_y = self.document.height - HEIGHT
+        self.scroll = min(self.scroll + SCROLL_STEP, max_y)
+        self.render()
 
 
 if __name__ == "__main__":
@@ -500,6 +554,3 @@ if __name__ == "__main__":
     browser = Browser()
     browser.load(sys.argv[1])
     tkinter.mainloop()
-    # headers, body = URL(sys.argv[1]).request()
-    # nodes = HTMLParser(body).parse()
-    # print_tree(nodes)
