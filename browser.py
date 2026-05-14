@@ -93,6 +93,7 @@ class Element:
         self.children = []
         self.parent = parent
         self.attributes = attributes
+        self.style = {}
 
     def __repr__(self) -> str:
         return "<" + self.tag + ">"
@@ -120,6 +121,7 @@ def print_nodes(node, indent=0, file=None):
         print("Block")
     elif isinstance(node, InlineLayout):
         print("Inline")
+    print(node.__dict__)
     if node.children:
         for child in node.children:
             print_nodes(child, indent + 2, file)
@@ -213,7 +215,9 @@ class HTMLParser:
             self.unfinished.append(node)
 
     def get_attributes(self, text):
-        parts = text.split()
+        from shlex import split
+
+        parts = split(text)
         tag = parts[0].casefold()
         attributes = {}
         for attrpair in parts[1:]:
@@ -249,6 +253,66 @@ class HTMLParser:
                 self.add_tag("/head")
             else:
                 break
+
+
+def style(node):
+    node.style = {}
+    if isinstance(node, Element) and "style" in node.attributes:
+        pairs, _ = CSSParser(node.attributes["style"]).body()
+        for property in pairs:
+            node.style[property] = pairs[property]
+    for child in node.children:
+        style(child)
+
+
+class CSSParser:
+    def __init__(self, s) -> None:
+        self.s = s
+
+    def whitespace(self, i: int):
+        while i < len(self.s) and self.s[i].isspace():
+            i += 1
+        return None, i
+
+    def literal(self, i, literal):
+        assert self.s[i : i + len(literal)] == literal
+        return None, i + len(literal)
+
+    def word(self, i):
+        start = i
+        while i < len(self.s) and (self.s[i].isalnum() or self.s[i] in "-."):
+            i += 1
+        assert i > start
+        return self.s[start:i], i
+
+    def pair(self, i):
+        prop, i = self.word(i)
+        _, i = self.whitespace(i)
+        _, i = self.literal(i, ":")
+        _, i = self.whitespace(i)
+        val, i = self.word(i)
+        return (prop.lower(), val), i
+
+    def ignore_until(self, i, chars):
+        while i < len(self.s) and self.s[i] in chars:
+            i += 1
+        return None, i
+
+    def body(self, i=0):
+        pairs = {}
+        _, i = self.whitespace(i)
+        while i < len(self.s):
+            try:
+                (prop, val), i = self.pair(i)
+                pairs[prop] = val
+                _, i = self.whitespace(i)
+                _, i = self.literal(i, ";")
+            except AssertionError:
+                _, i = self.ignore_until(i, [";"])
+                if i < len(self.s) and self.s[i] == ";":
+                    _, i = self.literal(i, ";")
+            _, i = self.whitespace(i)
+        return pairs, i
 
 
 WIDTH, HEIGHT = 800, 600
@@ -297,6 +361,8 @@ BLOCK_ELEMENTS = [
 def layout_mode(node):
     if isinstance(node, Text):
         return "inline"
+    elif node.tag in BLOCK_ELEMENTS:
+        return "block"
     elif node.children:
         for child in node.children:
             if isinstance(child, Text):
@@ -340,9 +406,10 @@ class BlockLayout:
 
     def getDraw(self):
         display_list = []
-        if self.node.tag == "pre":
+        bgcolor = self.node.style.get("background-color", "transparent")
+        if bgcolor != "transparent":
             x2, y2 = self.x + self.width, self.y + self.height
-            rect = DrawRect(self.x, self.y, x2, y2, "gray")
+            rect = DrawRect(self.x, self.y, x2, y2, bgcolor)
             display_list.append(rect)
         for child in self.children:
             display_list.extend(child.getDraw())
@@ -524,6 +591,7 @@ class Browser:
 
         _, body = url.request()
         nodes = HTMLParser(body).parse()
+        style(nodes)
 
         self.document = DocumentLayout(nodes)
         self.document.layout()
