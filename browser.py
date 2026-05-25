@@ -4,23 +4,33 @@ import time
 import tkinter
 import tkinter.font
 from pathlib import Path
+from urllib.parse import urljoin
 
 
 class URL:
     def __init__(self, url) -> None:
         self.source = url
         if "://" not in url:
-            self.scheme = "file"
-            self.path = str(Path(url).expanduser())
+            path = Path(url).expanduser()
+            self._init_file(path, root=path.resolve().parent)
             return
 
-        self.scheme, url = url.split("://", 1)
+        self.scheme, rest = url.split("://", 1)
         assert self.scheme in ["http", "https", "file"]
 
         if self.scheme == "file":
-            self.path = str(Path(url).expanduser())
+            self._init_file(rest)
             return
 
+        self._init_http(rest)
+
+    def _init_file(self, path, root=None):
+        self.scheme = "file"
+        file_path = Path(path).expanduser()
+        self.path = str(file_path)
+        self.root = Path(root) if root is not None else file_path.resolve().parent
+
+    def _init_http(self, url):
         self.port = 80 if self.scheme == "http" else 443
 
         if "/" not in url:
@@ -31,6 +41,31 @@ class URL:
         if ":" in self.host:
             self.host, port = self.host.split(":", 1)
             self.port = int(port)
+
+    def resolve(self, ref):
+        if "://" in ref:
+            return URL(ref)
+
+        if self.scheme == "file":
+            current = Path(self.path).expanduser()
+            if ref.startswith("/"):
+                path = (self.root / ref.lstrip("/")).resolve()
+            else:
+                path = (current.parent / ref).resolve()
+            return URL.from_file(path, root=self.root)
+
+        base = f"{self.scheme}://{self.host}"
+        if self.port != (80 if self.scheme == "http" else 443):
+            base += f":{self.port}"
+        base += self.path
+        return URL(urljoin(base, ref))
+
+    @classmethod
+    def from_file(cls, path, root=None):
+        url = cls.__new__(cls)
+        url.source = str(path)
+        url._init_file(path, root=root)
+        return url
 
     def request(self):
         if self.scheme == "file":
@@ -56,7 +91,7 @@ class URL:
         response = s.makefile("r", encoding="utf8", newline="\r\n")
 
         status_line = response.readline()
-        version, status, explanation = status_line.split(" ", 2)
+        _, status, explanation = status_line.split(" ", 2)
         assert status == "200", "{}: {}".format(status, explanation)
 
         headers = {}
@@ -77,11 +112,26 @@ class URL:
         return headers, body
 
 
+def find_links(node, lst):
+    if not isinstance(node, Element):
+        return []
+    if (
+        node.tag == "link"
+        and node.attributes.get("rel", "") == "stylesheet"
+        and "href" in node.attributes
+    ):
+        lst.append(node.attributes["href"])
+    for child in node.children:
+        find_links(child, lst)
+    return lst
+
+
 class Text:
     def __init__(self, text, parent) -> None:
         self.text = text
         self.children = []
         self.parent = parent
+        self.style = {}
 
     def __repr__(self) -> str:
         return repr(self.text)
@@ -93,7 +143,13 @@ class Element:
         self.children = []
         self.parent = parent
         self.attributes = attributes
+
         self.style = {}
+        for pair in self.attributes.get("style", "").split(";"):
+            if ":" not in pair:
+                continue
+            prop, val = pair.split(":")
+            self.style[prop.strip().lower()] = val.strip()
 
     def __repr__(self) -> str:
         return "<" + self.tag + ">"
@@ -255,14 +311,66 @@ class HTMLParser:
                 break
 
 
-def style(node):
-    node.style = {}
-    if isinstance(node, Element) and "style" in node.attributes:
-        pairs, _ = CSSParser(node.attributes["style"]).body()
-        for property in pairs:
-            node.style[property] = pairs[property]
+class TagSelector:
+    def __init__(self, tag) -> None:
+        self.tag = tag
+
+    def matches(self, node):
+        return isinstance(node, Element) and self.tag == node.tag
+
+    def priority(self):
+        return 1
+
+
+class ClassSelector:
+    def __init__(self, cls) -> None:
+        self.cls = cls
+
+    def matches(self, node):
+        return self.cls in node.attributes.get("class", "").split()
+
+    def priority(self):
+        return 16
+
+
+class IdSelector:
+    def __init__(self, tag) -> None:
+        self.id = id
+
+    def matches(self, node):
+        return self.id == node.attributes.get("id", "")
+
+    def priority(self):
+        return 256
+
+
+INHERITED_PROPERTIES = {
+    "font-style": "normal",
+    "font-weight": "normal",
+    "font-size": "16px",
+    "color": "black",
+}
+
+
+def style(node, rules):
+    if isinstance(node, Text):
+        node.style = dict(node.parent.style)
+        return
+
+    for selector, pairs in rules:
+        if selector.matches(node):
+            for property in pairs:
+                if property not in node.style:
+                    node.style[property] = pairs[property]
+    for property, default in INHERITED_PROPERTIES.items():
+        if property not in node.style:
+            if node.parent:
+                node.style[property] = node.parent.style[property]
+            else:
+                node.style[property] = default
+
     for child in node.children:
-        style(child)
+        style(child, rules)
 
 
 class CSSParser:
@@ -275,12 +383,14 @@ class CSSParser:
         return None, i
 
     def literal(self, i, literal):
-        assert self.s[i : i + len(literal)] == literal
+        assert self.s[i : i + len(literal)] == literal, (
+            f"i: {i}, literal: {self.s[i : i + len(literal)]} == {literal}"
+        )
         return None, i + len(literal)
 
     def word(self, i):
         start = i
-        while i < len(self.s) and (self.s[i].isalnum() or self.s[i] in "-."):
+        while i < len(self.s) and self.s[i].isalnum() or self.s[i] in "#-.%":
             i += 1
         assert i > start
         return self.s[start:i], i
@@ -298,21 +408,61 @@ class CSSParser:
             i += 1
         return None, i
 
-    def body(self, i=0):
+    def body(self, i):
         pairs = {}
+        _, i = self.literal(i, "{")
         _, i = self.whitespace(i)
-        while i < len(self.s):
+        while i < len(self.s) and self.s[i] != "}":
             try:
                 (prop, val), i = self.pair(i)
                 pairs[prop] = val
                 _, i = self.whitespace(i)
                 _, i = self.literal(i, ";")
             except AssertionError:
-                _, i = self.ignore_until(i, [";"])
+                _, i = self.ignore_until(i, [";", "}"])
                 if i < len(self.s) and self.s[i] == ";":
                     _, i = self.literal(i, ";")
             _, i = self.whitespace(i)
+
+        _, i = self.literal(i, "}")
         return pairs, i
+
+    def selector(self, i):
+        if self.s[i] == "#":
+            _, i = self.literal(i, "#")
+            name, i = self.word(i)
+            return IdSelector(name), i
+        elif self.s[i] == ".":
+            _, i = self.literal(i, ".")
+            name, i = self.word(i)
+            return ClassSelector(name), i
+        else:
+            name, i = self.word(i)
+            return TagSelector(name.lower()), i
+
+    def rule(self, i):
+        selector, i = self.selector(i)
+        _, i = self.whitespace(i)
+        body, i = self.body(i)
+        return (selector, body), i
+
+    def file(self, i):
+        rules = []
+        _, i = self.whitespace(i)
+        while i < len(self.s):
+            try:
+                rule, i = self.rule(i)
+                rules.append(rule)
+            except AssertionError:
+                _, i = self.ignore_until(i, ["}"])
+                _, i = self.literal(i, "}")
+
+            _, i = self.whitespace(i)
+        return rules, i
+
+    def parse(self):
+        rules, _ = self.file(0)
+        return rules
 
 
 WIDTH, HEIGHT = 800, 600
@@ -470,7 +620,7 @@ class InlineLayout:
             self.flush()
             self.cursor_y += V_STEP
 
-    def text(self, text):
+    def text(self, text, color):
         font = tkinter.font.Font(size=self.size, weight=self.weight, slant=self.style)
         for word in text.split():
             w = font.measure(word)
@@ -478,13 +628,12 @@ class InlineLayout:
                 self.flush()
                 self.cursor_y += font.metrics("linespace") * 1.25
                 self.cursor_x = H_STEP
-            self.line.append((self.cursor_x, word, font))
+            self.line.append((self.cursor_x, word, font, color))
             self.cursor_x += w + font.measure(" ")
 
     def recurse(self, tree):
         if isinstance(tree, Text):
-            for word in tree.text.split():
-                self.text(word)
+            self.text(tree.text, tree.style["color"])
         else:
             self.open_tag(tree.tag)
             for child in tree.children:
@@ -494,12 +643,12 @@ class InlineLayout:
     def flush(self):
         if not self.line:
             return
-        metrics = [font.metrics() for _, _, font in self.line]
+        metrics = [font.metrics() for _, _, font, _ in self.line]
         max_ascent = max([metric["ascent"] for metric in metrics])
         baseline = self.cursor_y + 1.2 * max_ascent
-        for x, word, font in self.line:
+        for x, word, font, color in self.line:
             y = baseline - font.metrics("ascent")
-            self.display_list.append((x, y, word, font))
+            self.display_list.append((x, y, word, font, color))
         self.cursor_x = self.x
         self.line = []
         max_descent = max([metric["descent"] for metric in metrics])
@@ -507,7 +656,8 @@ class InlineLayout:
 
     def getDraw(self):
         return tuple(
-            DrawText(x, y, word, font) for x, y, word, font in self.display_list
+            DrawText(x, y, word, font, color)
+            for x, y, word, font, color in self.display_list
         )
 
 
@@ -537,11 +687,12 @@ class DocumentLayout:
 
 
 class DrawText:
-    def __init__(self, x1, y1, text, font) -> None:
+    def __init__(self, x1, y1, text, font, color) -> None:
         self.left = x1
         self.top = y1
         self.text = text
         self.font = font
+        self.color = color
         self.bottom = y1 + font.metrics("linespace")
 
     def execute(self, canvas, scroll):
@@ -550,6 +701,7 @@ class DrawText:
             self.top - scroll,
             text=self.text,
             font=self.font,
+            fill=self.color,
             anchor="nw",
         )
 
@@ -591,7 +743,14 @@ class Browser:
 
         _, body = url.request()
         nodes = HTMLParser(body).parse()
-        style(nodes)
+
+        rules = []
+
+        for link in find_links(nodes, []):
+            _, body = url.resolve(link).request()
+            rules.extend(CSSParser(body).parse())
+
+        style(nodes, rules)
 
         self.document = DocumentLayout(nodes)
         self.document.layout()
@@ -621,4 +780,4 @@ if __name__ == "__main__":
 
     browser = Browser()
     browser.load(sys.argv[1])
-    tkinter.mainloop()
+    # tkinter.mainloop()
