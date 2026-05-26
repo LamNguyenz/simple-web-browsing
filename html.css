@@ -1,0 +1,112 @@
+html {
+    display: block;
+}
+body {
+    display: block;
+}
+div {
+    display: block;
+}
+p {
+    display: block;
+}
+h1 {
+    display: block;
+}
+h2 {
+    display: block;
+}
+h3 {
+    display: block;
+}
+h4 {
+    display: block;
+}
+h5 {
+    display: block;
+}
+h6 {
+    display: block;
+}
+ul {
+    display: block;
+}
+ol {
+    display: block;
+}
+li {
+    display: block;
+}
+pre {
+    display: block;
+}
+
+head {
+    display: none;
+}
+script {
+    display: none;
+}
+style {
+    display: none;
+}
+
+span {
+    display: inline;
+}
+a {
+    display: inline;
+}
+b {
+    display: inline;
+}
+i {
+    display: inline;
+}
+strong {
+    display: inline;
+}
+em {
+    display: inline;
+}
+code {
+    display: inline;
+}
+small {
+    display: inline;
+}
+big {
+    display: inline;
+}
+br {
+    display: inline;
+}
+
+a {
+    color: blue;
+}
+
+i {
+    font-style: italic;
+}
+em {
+    font-style: italic;
+}
+
+b {
+    font-weight: bold;
+}
+strong {
+    font-weight: bold;
+}
+
+small {
+    font-size: 90%;
+}
+big {
+    font-size: 110%;
+}
+
+pre {
+    font-family: monospace;
+}
