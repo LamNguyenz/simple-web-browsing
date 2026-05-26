@@ -3,9 +3,7 @@ import ssl
 import time
 import tkinter
 import tkinter.font
-from io import IncrementalNewlineDecoder
 from pathlib import Path
-from sys import displayhook
 from urllib.parse import urljoin
 
 
@@ -187,7 +185,7 @@ def print_layout(layout, indent=0):
         print("Block")
     elif isinstance(layout, InlineLayout):
         print("Inline")
-    print(layout.node.__dict__)
+    print(layout.__dict__)
 
     if layout.children:
         for child in layout.children:
@@ -574,6 +572,21 @@ def px(s):
         return 0
 
 
+def is_inline_node(node):
+    if isinstance(node, Text):
+        return not node.text.isspace()
+    return node.style.get("display", "inline") != "block"
+
+
+class AnonymousBlock:
+    def __init__(self, parent, children) -> None:
+        self.tag = "anonymous"
+        self.parent = parent
+        self.children = children
+        self.attributes = {}
+        self.style = dict(parent.style)
+
+
 class BlockLayout:
     def __init__(self, node, parent) -> None:
         self.node = node
@@ -587,21 +600,37 @@ class BlockLayout:
 
     def has_block_children(self):
         for child in self.node.children:
-            if isinstance(child, Text):
-                if not child.text.isspace():
-                    return False
-            elif child.style.get("display", "inline") == "block":
+            if is_inline_node(child):
                 return False
         return True
 
+    def add_inline_child(self, inline_nodes):
+        if inline_nodes:
+            anonymous = AnonymousBlock(self.node, inline_nodes)
+            self.children.append(InlineLayout(anonymous, self))
+
+    def build_children(self):
+        inline_nodes = []
+        for child in self.node.children:
+            if is_inline_node(child):
+                inline_nodes.append(child)
+                continue
+
+            self.add_inline_child(inline_nodes)
+            inline_nodes = []
+            self.children.append(BlockLayout(child, self))
+
+        self.add_inline_child(inline_nodes)
+
     def layout(self):
+        self.children = []
         if self.has_block_children():
             for child in self.node.children:
                 if isinstance(child, Text):
                     continue
                 self.children.append(BlockLayout(child, self))
         else:
-            self.children.append(InlineLayout(self.node, self))
+            self.build_children()
 
         self.mt = px(self.node.style.get("margin-top", "0px"))
         self.bt = px(self.node.style.get("border-top-width", "0px"))
@@ -752,7 +781,7 @@ class Browser:
 
         self.document = DocumentLayout(nodes)
         self.document.layout()
-        print_layout(self.document)
+        # print_layout(self.document)
         self.display_list = self.document.getDraw()
         self.render()
 
@@ -769,7 +798,7 @@ class Browser:
             cmd.execute(self.canvas, self.scroll)
 
     def scrolldown(self, e):
-        max_y = self.document.height - HEIGHT
+        max_y = self.document.h - HEIGHT
         self.scroll = min(self.scroll + SCROLL_STEP, max_y)
         self.render()
 
