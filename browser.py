@@ -186,6 +186,7 @@ def print_layout(layout, indent=0):
     elif isinstance(layout, InlineLayout):
         print("Inline")
     print(layout.__dict__)
+    print(layout.node.__dict__)
 
     if layout.children:
         for child in layout.children:
@@ -479,16 +480,83 @@ H_STEP, V_STEP = 13, 18
 SCROLL_STEP = 100
 
 
-class InlineLayout:
+class LineLayout:
     def __init__(self, node, parent) -> None:
         self.node = node
         self.parent = parent
         self.children = []
+        self.x = 0
+        self.y = 0
+        self.w = 0
+        self.h = 0
+        self.cx = 0
+
+    def append(self, child):
+        self.children.append(child)
+        child.parent = self
+        self.cx += child.w + child.font.measure(" ")
+
+    def layout(self):
+        self.w = self.parent.w
+        if not self.children:
+            self.h = 0
+            return
+        metrics = [child.font.metrics() for child in self.children]
+        max_ascent = max([metric["ascent"] for metric in metrics])
+        baseline = self.y + 1.2 * max_ascent
+
+        dx = 0
+        for child, metric in zip(self.children, metrics):
+            child.x = self.x + dx
+            child.y = baseline - metric["ascent"]
+            dx += child.w + child.font.measure(" ")
+        max_descent = max([metric["descent"] for metric in metrics])
+        self.h = 1.2 * (max_descent + max_ascent)
+
+    def get_draw(self):
+        display_list = []
+        for child in self.children:
+            display_list.extend(child.get_draw())
+        return tuple(display_list)
+
+
+class TextLayout:
+    def __init__(self, node, word) -> None:
+        self.node = node
+        self.word = word
+        self.children = []
+        self.x = -1
+        self.y = -1
+        self.w = -1
+        self.h = -1
+
+    def layout(self):
+        weight = self.node.style["font-weight"]
+        style = self.node.style["font-style"]
+        if style == "normal":
+            style = "roman"
+        size = int(px(self.node.style["font-size"]) * 0.75)
+        self.font = tkinter.font.Font(size=size, weight=weight, slant=style)
+
+        self.w = self.font.measure(self.word)
+        self.h = self.font.metrics("linespace")
+
+    def get_draw(self):
+        color = self.node.style["color"]
+        return [DrawText(self.x, self.y, self.word, self.font, color)]
+
+
+class InlineLayout:
+    def __init__(self, node, parent) -> None:
+        self.node = node
+        self.parent = parent
+        self.children = [LineLayout(self.node, self)]
 
         self.x = -1
         self.y = -1
         self.w = -1
         self.h = -1
+        self.line_height = 0
 
     def layout(self):
         self.mt = self.bt = self.pt = 0
@@ -503,16 +571,10 @@ class InlineLayout:
             - self.parent.br
         )
 
-        self.cx = self.x
         self.cy = self.y
-        self.weight = "normal"
-        self.style = "roman"
-        self.size = 16
-
-        self.display_list = []
-        self.line = []
         self.recurse(self.node)
         self.flush()
+        self.children.pop()
 
         self.h = self.cy - self.y
 
@@ -521,48 +583,39 @@ class InlineLayout:
             self.text(node)
         else:
             if node.tag == "br":
-                self.flush()
+                self.break_line()
             for child in node.children:
                 self.recurse(child)
 
-    def font(self, node):
-        weight = node.style["font-weight"]
-        style = node.style["font-style"]
-        if style == "normal":
-            style = "roman"
-        size = int(px(node.style["font-size"]) * 0.75)
-        return tkinter.font.Font(size=size, weight=weight, slant=style)
-
     def text(self, node):
-        font = self.font(node)
-        color = node.style["color"]
-
         for word in node.text.split():
-            w = font.measure(word)
-            if self.cx + w > WIDTH - H_STEP:
+            child = TextLayout(node, word)
+            child.layout()
+            if self.children[-1].cx + child.w > self.w:
                 self.flush()
-            self.line.append((self.cx, word, font, color))
-            self.cx += w + font.measure(" ")
+            self.children[-1].append(child)
 
     def flush(self):
-        if not self.line:
-            return
-        metrics = [font.metrics() for _, _, font, _ in self.line]
-        max_ascent = max([metric["ascent"] for metric in metrics])
-        baseline = self.cy + 1.2 * max_ascent
-        for x, word, font, color in self.line:
-            y = baseline - font.metrics("ascent")
-            self.display_list.append((x, y, word, font, color))
-        self.cx = self.x
-        self.line = []
-        max_descent = max([metric["descent"] for metric in metrics])
-        self.cy = baseline + 1.2 * max_descent
+        child = self.children[-1]
+        child.x = self.x
+        child.y = self.cy
+        child.layout()
+        self.cy += child.h
+        self.line_height = child.h
+        self.children.append(LineLayout(self.node, self))
 
-    def getDraw(self):
-        return tuple(
-            DrawText(x, y, word, font, color)
-            for x, y, word, font, color in self.display_list
-        )
+    def break_line(self):
+        if self.children[-1].children:
+            self.flush()
+        else:
+            self.cy += self.line_height
+        self.children.append(LineLayout(self.node, self))
+
+    def get_draw(self):
+        display_list = []
+        for child in self.children:
+            display_list.extend(child.get_draw())
+        return tuple(display_list)
 
 
 def px(s):
@@ -667,7 +720,7 @@ class BlockLayout:
 
         self.h = y - self.y
 
-    def getDraw(self):
+    def get_draw(self):
         display_list = []
         bgcolor = self.node.style.get("background-color", "transparent")
         if bgcolor != "transparent":
@@ -675,7 +728,7 @@ class BlockLayout:
             rect = DrawRect(self.x, self.y, x2, y2, bgcolor)
             display_list.append(rect)
         for child in self.children:
-            display_list.extend(child.getDraw())
+            display_list.extend(child.get_draw())
         return tuple(display_list)
 
 
@@ -705,9 +758,9 @@ class DocumentLayout:
         child.layout()
         self.h = child.h
 
-    def getDraw(self):
+    def get_draw(self):
         display_list = []
-        display_list.extend(self.children[0].getDraw())
+        display_list.extend(self.children[0].get_draw())
         return tuple(display_list)
 
 
@@ -782,7 +835,7 @@ class Browser:
         self.document = DocumentLayout(nodes)
         self.document.layout()
         # print_layout(self.document)
-        self.display_list = self.document.getDraw()
+        self.display_list = self.document.get_draw()
         self.render()
 
         draw_time = time.time()

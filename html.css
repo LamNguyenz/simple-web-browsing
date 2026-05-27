@@ -40,7 +40,9 @@ li {
 pre {
     display: block;
 }
-
+header {
+    display: block;
+}
 head {
     display: none;
 }
