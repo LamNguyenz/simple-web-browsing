@@ -3,6 +3,7 @@ import ssl
 import time
 import tkinter
 import tkinter.font
+from enum import Enum
 from pathlib import Path
 from urllib.parse import urljoin
 
@@ -42,24 +43,6 @@ class URL:
             self.host, port = self.host.split(":", 1)
             self.port = int(port)
 
-    def resolve(self, ref):
-        if "://" in ref:
-            return URL(ref)
-
-        if self.scheme == "file":
-            current = Path(self.path).expanduser()
-            if ref.startswith("/"):
-                path = (self.root / ref.lstrip("/")).resolve()
-            else:
-                path = (current.parent / ref).resolve()
-            return URL.from_file(path, root=self.root)
-
-        base = f"{self.scheme}://{self.host}"
-        if self.port != (80 if self.scheme == "http" else 443):
-            base += f":{self.port}"
-        base += self.path
-        return URL(urljoin(base, ref))
-
     @classmethod
     def from_file(cls, path, root=None):
         url = cls.__new__(cls)
@@ -76,6 +59,7 @@ class URL:
         s = socket.socket(
             family=socket.AF_INET, type=socket.SOCK_STREAM, proto=socket.IPPROTO_TCP
         )
+        print(f"Host: {self.host}, port: {self.port}")
         s.connect((self.host, self.port))
 
         if self.scheme == "https":
@@ -124,6 +108,10 @@ def find_links(node, lst):
     for child in node.children:
         find_links(child, lst)
     return lst
+
+
+def relative_url(url, current) -> str:
+    return urljoin(current, url)
 
 
 class Text:
@@ -766,17 +754,18 @@ class DocumentLayout:
 
 class DrawText:
     def __init__(self, x1, y1, text, font, color) -> None:
-        self.left = x1
-        self.top = y1
+        self.x1 = x1
+        self.y1 = y1
         self.text = text
         self.font = font
         self.color = color
-        self.bottom = y1 + font.metrics("linespace")
 
-    def execute(self, canvas, scroll):
+        self.y2 = y1 + font.metrics("linespace")
+
+    def draw(self, canvas, scroll):
         canvas.create_text(
-            self.left,
-            self.top - scroll,
+            self.x1,
+            self.y1 - scroll,
             text=self.text,
             font=self.font,
             fill=self.color,
@@ -786,24 +775,42 @@ class DrawText:
 
 class DrawRect:
     def __init__(self, x1, y1, x2, y2, color) -> None:
-        self.top = y1
-        self.left = x1
-        self.bottom = y2
-        self.right = x2
+        self.x1 = x1
+        self.y1 = y1
+        self.x2 = x2
+        self.y2 = y2
         self.color = color
 
-    def execute(self, canvas, scroll):
+    def draw(self, canvas, scroll):
         canvas.create_rectangle(
-            self.left,
-            self.top - scroll,
-            self.right,
-            self.bottom - scroll,
+            self.x1,
+            self.y1 - scroll,
+            self.x2,
+            self.y2 - scroll,
             width=0,
             fill=self.color,
         )
 
 
+def find_layout(x, y, tree):
+    if not (tree.x <= x < tree.x + tree.w and tree.y <= y < tree.y + tree.h):
+        return None
+
+    for child in reversed(tree.children):
+        result = find_layout(x, y, child)
+        if result:
+            return result
+    return tree
+
+
+def is_link(node):
+    return isinstance(node, Element) and node.tag == "a" and "href" in node.attributes
+
+
 class Browser:
+    class FOCUS_EL(Enum):
+        ADDRESS_BAR = "address bar"
+
     def __init__(self):
         self.window = tkinter.Tk()
         self.window.title("Web Browser")
@@ -811,25 +818,61 @@ class Browser:
             self.window, width=WIDTH, height=HEIGHT, bg="white"
         )
         self.canvas.pack()
+        self.url = ""
 
+        self.history = []
+        self.focus = None
+        self.address_bar = ""
         self.scroll = 0
+
         self.window.bind("<Down>", self.scrolldown)
+        self.window.bind("<Button-1>", self.handle_click)
         self.display_list = []
 
-    def load(self, url):
-        start_time = time.time()
-        if not isinstance(url, URL):
-            url = URL(url)
+    def handle_click(self, e):
+        self.focus = None
+        if e.y < 60:  # On the address bar
+            if 10 <= e.x < 35 and 10 <= e.y < 50:
+                self.go_back()
+            elif 50 <= e.x < 790 and 10 <= e.y < 50:
+                self.focus = self.FOCUS_EL.ADDRESS_BAR
+                self.address_bar = ""
+                self.render()
+        else:
+            x, y = e.x, e.y + self.scroll - 60
+            obj = find_layout(x, y, self.document)
+            if not obj:
+                return
+            node = obj.node
+            while node and not is_link(node):
+                node = node.parent
+            if node:
+                url = relative_url(node.attributes["href"], self.url)
+                self.load(url)
 
-        _, body = url.request()
+    def go_back(self):
+        pass
+
+    def load(self, url: str):
+        start_time = time.time()
+
+        # Process the property
+        self.address_bar = url
+        self.url = url
+        self.history.append(url)
+
+        url_obj = URL(url)
+        _, body = url_obj.request()
         nodes = HTMLParser(body).parse()
 
         rules = []
 
         for link in find_links(nodes, []):
-            _, body = url.resolve(link).request()
+            _, body = URL(relative_url(link, url)).request()
             rules.extend(CSSParser(body).parse())
 
+        rules.sort(key=lambda x: x[0].priority())
+        rules.reverse()
         style(nodes, rules)
 
         self.document = DocumentLayout(nodes)
@@ -844,11 +887,17 @@ class Browser:
     def render(self):
         self.canvas.delete("all")
         for cmd in self.display_list:
-            if cmd.top > self.scroll + HEIGHT:
+            if cmd.y1 > self.scroll + HEIGHT - 60:
                 continue
-            if cmd.bottom < self.scroll:
+            if cmd.y2 < self.scroll:
                 continue
-            cmd.execute(self.canvas, self.scroll)
+            cmd.draw(self.canvas, self.scroll - 60)
+        self.canvas.create_rectangle(0, 0, 800, 60, width=0, fill="light gray")
+        self.canvas.create_rectangle(50, 10, 790, 50)
+        font = tkinter.font.Font(family="Courier", size=30)
+        self.canvas.create_text(55, 15, anchor="nw", text=self.address_bar, font=font)
+        self.canvas.create_rectangle(10, 10, 35, 50)
+        self.canvas.create_polygon(15, 30, 30, 15, 30, 45, fill="black")
 
     def scrolldown(self, e):
         max_y = self.document.h - HEIGHT
