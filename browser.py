@@ -375,9 +375,21 @@ class CSSParser:
     def __init__(self, s) -> None:
         self.s = s
 
+    def comment(self, i: int):
+        assert self.s[i : i + 2] == "/*"
+        end = self.s.find("*/", i + 2)
+        if end == -1:
+            return None, len(self.s)
+        return None, end + 2
+
     def whitespace(self, i: int):
-        while i < len(self.s) and self.s[i].isspace():
-            i += 1
+        while i < len(self.s):
+            if self.s[i].isspace():
+                i += 1
+            elif self.s[i : i + 2] == "/*":
+                _, i = self.comment(i)
+            else:
+                break
         return None, i
 
     def literal(self, i, literal):
@@ -388,7 +400,7 @@ class CSSParser:
 
     def word(self, i):
         start = i
-        while i < len(self.s) and self.s[i].isalnum() or self.s[i] in "#-.%":
+        while i < len(self.s) and (self.s[i].isalnum() or self.s[i] in "#-.%"):
             i += 1
         assert i > start, f"i: {i}, word: {self.s[i]}"
         return self.s[start:i], i
@@ -402,7 +414,7 @@ class CSSParser:
         return (prop.lower(), val), i
 
     def ignore_until(self, i, chars):
-        while i < len(self.s) and self.s[i] in chars:
+        while i < len(self.s) and self.s[i] not in chars:
             i += 1
         return None, i
 
@@ -826,7 +838,10 @@ class Browser:
         self.scroll = 0
 
         self.window.bind("<Down>", self.scrolldown)
+        self.window.bind("<Up>", self.scrollup)
+        self.window.bind("<Key>", self.key_press)
         self.window.bind("<Button-1>", self.handle_click)
+        self.window.bind("<Return>", self.press_enter)
         self.display_list = []
 
     def handle_click(self, e):
@@ -850,8 +865,29 @@ class Browser:
                 url = relative_url(node.attributes["href"], self.url)
                 self.load(url)
 
+    def key_press(self, e):
+        if self.focus == self.FOCUS_EL.ADDRESS_BAR and e.keysym == "BackSpace":
+            self.address_bar = self.address_bar[:-1]
+            self.render()
+            return
+        if len(e.char) == 0:
+            return
+        if not (0x20 <= ord(e.char) < 0x7F):
+            return
+        if self.focus == self.FOCUS_EL.ADDRESS_BAR:
+            self.address_bar += e.char
+        self.render()
+
+    def press_enter(self, e):
+        if self.focus == self.FOCUS_EL.ADDRESS_BAR:
+            self.focus = None
+            self.load(self.address_bar)
+
     def go_back(self):
-        pass
+        if len(self.history) > 1:
+            self.history.pop()
+            back = self.history.pop()
+            self.load(back)
 
     def load(self, url: str):
         start_time = time.time()
@@ -898,10 +934,17 @@ class Browser:
         self.canvas.create_text(55, 15, anchor="nw", text=self.address_bar, font=font)
         self.canvas.create_rectangle(10, 10, 35, 50)
         self.canvas.create_polygon(15, 30, 30, 15, 30, 45, fill="black")
+        if self.focus == self.FOCUS_EL.ADDRESS_BAR:
+            w = font.measure(self.address_bar)
+            self.canvas.create_line(55 + w, 15, 55 + w, 45)
 
     def scrolldown(self, e):
         max_y = self.document.h - HEIGHT
         self.scroll = min(self.scroll + SCROLL_STEP, max_y)
+        self.render()
+
+    def scrollup(self, e):
+        self.scroll = max(self.scroll - SCROLL_STEP, 0)
         self.render()
 
 
