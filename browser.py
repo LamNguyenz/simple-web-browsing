@@ -166,15 +166,16 @@ def print_nodes(node, indent=0):
 
 
 def print_layout(layout, indent=0):
-    print(" " * indent)
-    if isinstance(layout, DocumentLayout):
-        print("Document")
-    elif isinstance(layout, BlockLayout):
-        print("Block")
-    elif isinstance(layout, InlineLayout):
-        print("Inline")
-    print(layout.__dict__)
-    print(layout.node.__dict__)
+    if isinstance(layout.node, Element) and layout.node.tag == "input":
+        print(" " * indent)
+        if isinstance(layout, DocumentLayout):
+            print("Document")
+        elif isinstance(layout, BlockLayout):
+            print("Block")
+        elif isinstance(layout, InlineLayout):
+            print("Inline")
+        print(layout.__dict__)
+        print(type(layout.node), layout.node.__dict__)
 
     if layout.children:
         for child in layout.children:
@@ -217,7 +218,19 @@ class HTMLParser:
     def parse(self):
         text = ""
         in_tag = False
-        for c in self.body:
+        i = 0
+        while i < len(self.body):
+            if self.body.startswith("<!--", i):
+                if text:
+                    self.add_text(text)
+                    text = ""
+                end = self.body.find("-->", i + 4)
+                if end == -1:
+                    break
+                i = end + 3
+                continue
+
+            c = self.body[i]
             if c == "<":
                 in_tag = True
                 if text:
@@ -229,6 +242,7 @@ class HTMLParser:
                 text = ""
             else:
                 text += c
+            i += 1
         if not in_tag and text:
             self.add_text(text)
         return self.finish()
@@ -546,6 +560,44 @@ class TextLayout:
         return [DrawText(self.x, self.y, self.word, self.font, color)]
 
 
+class InputLayout:
+    def __init__(self, node) -> None:
+        self.node = node
+        self.children = []
+        self.x = -1
+        self.y = -1
+        self.w = 200
+        self.h = 20
+
+    def is_valid_coordinate(self):
+        return self.x != -1 and self.y != -1 and self.w != -1 and self.h != -1
+
+    def layout(self):
+        weight = self.node.style["font-weight"]
+        style = self.node.style["font-style"]
+        if style == "normal":
+            style = "roman"
+        size = int(px(self.node.style["font-size"]) * 0.75)
+        self.font = tkinter.font.Font(size=size, weight=weight, slant=style)
+
+    def get_draw(self):
+        if not self.is_valid_coordinate():
+            return []
+        display_list = []
+        x1, x2 = self.x, self.x + self.w
+        y1, y2 = self.y, self.y + self.h
+        bgcolor = "light gray" if self.node.tag == "input" else "yellow"
+        display_list.append(DrawRect(x1, y1, x2, y2, bgcolor))
+
+        if self.node.tag == "input":
+            text = self.node.attributes.get("value", "")
+        else:
+            text = self.node.children[0].text
+        color = self.node.style["color"]
+        display_list.append(DrawText(x1, y1, text, self.font, color))
+        return tuple(display_list)
+
+
 class InlineLayout:
     def __init__(self, node, parent) -> None:
         self.node = node
@@ -584,6 +636,8 @@ class InlineLayout:
         else:
             if node.tag == "br":
                 self.break_line()
+            if node.tag == "input":
+                self.input(node)
             for child in node.children:
                 self.recurse(child)
 
@@ -594,6 +648,13 @@ class InlineLayout:
             if self.children[-1].cx + child.w > self.w:
                 self.flush()
             self.children[-1].append(child)
+
+    def input(self, node):
+        child = InputLayout(node)
+        child.layout()
+        if self.children[-1].cx + child.w > self.w:
+            self.flush()
+        self.children[-1].append(child)
 
     def flush(self):
         child = self.children[-1]
@@ -822,6 +883,7 @@ def is_link(node):
 class Browser:
     class FOCUS_EL(Enum):
         ADDRESS_BAR = "address bar"
+        INPUT = "input"
 
     def __init__(self):
         self.window = tkinter.Tk()
@@ -834,6 +896,7 @@ class Browser:
 
         self.history = []
         self.focus = None
+        self.focus_el = None
         self.address_bar = ""
         self.scroll = 0
 
@@ -859,29 +922,64 @@ class Browser:
             if not obj:
                 return
             node = obj.node
-            while node and not is_link(node):
+            while node:
+                if isinstance(node, Text):
+                    pass
+                elif is_link(node):
+                    url = relative_url(node.attributes["href"], self.url)
+                    return self.load(url)
+                elif node.tag == "input":
+                    node.attributes["value"] = ""
+                    self.focus = self.FOCUS_EL.INPUT
+                    self.focus_el = obj
+                    return self.layout(self.document.node)
+                elif node.tag == "button":
+                    return self.submit_form()
                 node = node.parent
-            if node:
-                url = relative_url(node.attributes["href"], self.url)
-                self.load(url)
+
+    def is_printable_key(self, char):
+        return len(char) > 0 and 0x20 <= ord(char) < 0x7F
+
+    def delete_character(self):
+        if not self.focus_el:
+            return
+
+        if self.focus == self.FOCUS_EL.ADDRESS_BAR:
+            self.address_bar = self.address_bar[:-1]
+        elif self.FOCUS_EL.INPUT:
+            if not self.focus_el:
+                return
+            value = self.focus_el.node.attributes.get("value", "")
+            self.focus_el.node.attributes["value"] = value[:-1]
+
+    def append_character(self, char):
+        if self.focus == self.FOCUS_EL.ADDRESS_BAR:
+            self.address_bar += char
+        elif self.FOCUS_EL.INPUT:
+            if not self.focus_el:
+                return
+            self.focus_el.node.attributes["value"] += char
 
     def key_press(self, e):
-        if self.focus == self.FOCUS_EL.ADDRESS_BAR and e.keysym == "BackSpace":
-            self.address_bar = self.address_bar[:-1]
-            self.render()
+        if not self.focus:
             return
-        if len(e.char) == 0:
-            return
-        if not (0x20 <= ord(e.char) < 0x7F):
-            return
-        if self.focus == self.FOCUS_EL.ADDRESS_BAR:
-            self.address_bar += e.char
-        self.render()
+
+        if e.keysym == "BackSpace":
+            self.delete_character()
+        else:
+            if not self.is_printable_key(e.char):
+                return
+            self.append_character(e.char)
+
+        self.layout(self.document.node)
 
     def press_enter(self, e):
         if self.focus == self.FOCUS_EL.ADDRESS_BAR:
             self.focus = None
             self.load(self.address_bar)
+
+    def submit_form(self):
+        print("Submit form")
 
     def go_back(self):
         if len(self.history) > 1:
@@ -911,14 +1009,18 @@ class Browser:
         rules.reverse()
         style(nodes, rules)
 
+        self.layout(nodes)
+
+        draw_time = time.time()
+        print(f"Total time: {draw_time - start_time:.3f}s")
+
+    def layout(self, nodes):
         self.document = DocumentLayout(nodes)
         self.document.layout()
         # print_layout(self.document)
         self.display_list = self.document.get_draw()
         self.render()
-
-        draw_time = time.time()
-        print(f"Total time: {draw_time - start_time:.3f}s")
+        self.max_y = self.document.h - HEIGHT
 
     def render(self):
         self.canvas.delete("all")
@@ -937,10 +1039,14 @@ class Browser:
         if self.focus == self.FOCUS_EL.ADDRESS_BAR:
             w = font.measure(self.address_bar)
             self.canvas.create_line(55 + w, 15, 55 + w, 45)
+        elif self.focus == self.FOCUS_EL.INPUT and self.focus_el:
+            text = self.focus_el.node.attributes.get("value", "")
+            x = self.focus_el.x + self.focus_el.font.measure(text)
+            y = self.focus_el.y - self.scroll + 60
+            self.canvas.create_line(x, y, x, y + self.focus_el.h)
 
     def scrolldown(self, e):
-        max_y = self.document.h - HEIGHT
-        self.scroll = min(self.scroll + SCROLL_STEP, max_y)
+        self.scroll = min(self.scroll + SCROLL_STEP, self.max_y)
         self.render()
 
     def scrollup(self, e):
