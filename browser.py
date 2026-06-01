@@ -50,7 +50,7 @@ class URL:
         url._init_file(path, root=root)
         return url
 
-    def request(self):
+    def request(self, payload=None):
         if self.scheme == "file":
             with open(self.path, "r", encoding="utf8") as f:
                 body = f.read()
@@ -66,11 +66,15 @@ class URL:
             ctx = ssl.create_default_context()
             s = ctx.wrap_socket(s, server_hostname=self.host)
 
-        request = f"GET {self.path} HTTP/1.0\r\n"
-        request += f"Host: {self.host}\r\n"
-        request += "User-Agent: Browser - version\r\n"
-        request += "\r\n"
-        s.send(request.encode("utf8"))
+        method = "POST" if payload else "GET"
+        body = f"{method} {self.path} HTTP/1.0\r\n"
+        body += f"Host: {self.host}\r\n"
+        body += "User-Agent: Browser - version\r\n"
+        if payload:
+            content_length = len(payload.encode("utf8"))
+            body += f"Content-Length: {content_length}\r\n"
+        body += "\r\n" + (payload or "")
+        s.send(body.encode("utf8"))
 
         response = s.makefile("r", encoding="utf8", newline="\r\n")
 
@@ -934,7 +938,7 @@ class Browser:
                     self.focus_el = obj
                     return self.layout(self.document.node)
                 elif node.tag == "button":
-                    return self.submit_form()
+                    return self.submit_form(node)
                 node = node.parent
 
     def is_printable_key(self, char):
@@ -946,9 +950,7 @@ class Browser:
 
         if self.focus == self.FOCUS_EL.ADDRESS_BAR:
             self.address_bar = self.address_bar[:-1]
-        elif self.FOCUS_EL.INPUT:
-            if not self.focus_el:
-                return
+        elif self.focus == self.FOCUS_EL.INPUT:
             value = self.focus_el.node.attributes.get("value", "")
             self.focus_el.node.attributes["value"] = value[:-1]
 
@@ -978,8 +980,31 @@ class Browser:
             self.focus = None
             self.load(self.address_bar)
 
-    def submit_form(self):
-        print("Submit form")
+    def find_inputs(self, node, out=None):
+        if out is None:
+            out = []
+        if not isinstance(node, Element):
+            return
+        if node.tag == "input" and "name" in node.attributes:
+            out.append(node)
+        for child in node.children:
+            self.find_inputs(child, out)
+        return out
+
+    def submit_form(self, node):
+        while node and node.tag != "form":
+            node = node.parent
+        if not node:
+            return
+        inputs = self.find_inputs(node) or []
+        body = ""
+        for input in inputs:
+            name = input.attributes["name"]
+            value = input.attributes.get("value", "")
+            body += "&" + name + "=" + value.replace(" ", "%20")
+        body = body[1:]
+        url = relative_url(node.attributes["action"], self.url)
+        self.load(url, body)
 
     def go_back(self):
         if len(self.history) > 1:
@@ -987,7 +1012,7 @@ class Browser:
             back = self.history.pop()
             self.load(back)
 
-    def load(self, url: str):
+    def load(self, url: str, payload=None):
         start_time = time.time()
 
         # Process the property
@@ -996,7 +1021,7 @@ class Browser:
         self.history.append(url)
 
         url_obj = URL(url)
-        _, body = url_obj.request()
+        _, body = url_obj.request(payload)
         nodes = HTMLParser(body).parse()
 
         rules = []
