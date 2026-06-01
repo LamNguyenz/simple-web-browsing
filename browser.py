@@ -7,6 +7,8 @@ from enum import Enum
 from pathlib import Path
 from urllib.parse import urljoin
 
+import dukpy
+
 
 class URL:
     def __init__(self, url) -> None:
@@ -906,16 +908,22 @@ class Browser:
 
         self.window.bind("<Down>", self.scrolldown)
         self.window.bind("<Up>", self.scrollup)
-        self.window.bind("<Key>", self.key_press)
-        self.window.bind("<Button-1>", self.handle_click)
-        self.window.bind("<Return>", self.press_enter)
+        self.window.bind("<Key>", self._key_press)
+        self.window.bind("<Button-1>", self._handle_click)
+        self.window.bind("<Return>", self._press_enter)
         self.display_list = []
 
-    def handle_click(self, e):
+    def _go_back(self):
+        if len(self.history) > 1:
+            self.history.pop()
+            back = self.history.pop()
+            self.load(back)
+
+    def _handle_click(self, e):
         self.focus = None
         if e.y < 60:  # On the address bar
             if 10 <= e.x < 35 and 10 <= e.y < 50:
-                self.go_back()
+                self._go_back()
             elif 50 <= e.x < 790 and 10 <= e.y < 50:
                 self.focus = self.FOCUS_EL.ADDRESS_BAR
                 self.address_bar = ""
@@ -938,13 +946,13 @@ class Browser:
                     self.focus_el = obj
                     return self.layout(self.document.node)
                 elif node.tag == "button":
-                    return self.submit_form(node)
+                    return self._submit_form(node)
                 node = node.parent
 
-    def is_printable_key(self, char):
+    def _is_printable_key(self, char):
         return len(char) > 0 and 0x20 <= ord(char) < 0x7F
 
-    def delete_character(self):
+    def _delete_character(self):
         if not self.focus_el:
             return
 
@@ -954,7 +962,7 @@ class Browser:
             value = self.focus_el.node.attributes.get("value", "")
             self.focus_el.node.attributes["value"] = value[:-1]
 
-    def append_character(self, char):
+    def _append_character(self, char):
         if self.focus == self.FOCUS_EL.ADDRESS_BAR:
             self.address_bar += char
         elif self.FOCUS_EL.INPUT:
@@ -962,25 +970,25 @@ class Browser:
                 return
             self.focus_el.node.attributes["value"] += char
 
-    def key_press(self, e):
+    def _key_press(self, e):
         if not self.focus:
             return
 
         if e.keysym == "BackSpace":
-            self.delete_character()
+            self._delete_character()
         else:
-            if not self.is_printable_key(e.char):
+            if not self._is_printable_key(e.char):
                 return
-            self.append_character(e.char)
+            self._append_character(e.char)
 
         self.layout(self.document.node)
 
-    def press_enter(self, e):
+    def _press_enter(self, e):
         if self.focus == self.FOCUS_EL.ADDRESS_BAR:
             self.focus = None
             self.load(self.address_bar)
 
-    def find_inputs(self, node, out=None):
+    def _find_inputs(self, node, out=None):
         if out is None:
             out = []
         if not isinstance(node, Element):
@@ -988,15 +996,15 @@ class Browser:
         if node.tag == "input" and "name" in node.attributes:
             out.append(node)
         for child in node.children:
-            self.find_inputs(child, out)
+            self._find_inputs(child, out)
         return out
 
-    def submit_form(self, node):
+    def _submit_form(self, node):
         while node and node.tag != "form":
             node = node.parent
         if not node:
             return
-        inputs = self.find_inputs(node) or []
+        inputs = self._find_inputs(node) or []
         body = ""
         for input in inputs:
             name = input.attributes["name"]
@@ -1005,12 +1013,6 @@ class Browser:
         body = body[1:]
         url = relative_url(node.attributes["action"], self.url)
         self.load(url, body)
-
-    def go_back(self):
-        if len(self.history) > 1:
-            self.history.pop()
-            back = self.history.pop()
-            self.load(back)
 
     def load(self, url: str, payload=None):
         start_time = time.time()
