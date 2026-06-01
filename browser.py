@@ -882,6 +882,18 @@ def find_layout(x, y, tree):
     return tree
 
 
+def find_inputs(node, out=None):
+    if out is None:
+        out = []
+    if not isinstance(node, Element):
+        return
+    if node.tag == "input" and "name" in node.attributes:
+        out.append(node)
+    for child in node.children:
+        find_inputs(child, out)
+    return out
+
+
 def is_link(node):
     return isinstance(node, Element) and node.tag == "a" and "href" in node.attributes
 
@@ -988,23 +1000,12 @@ class Browser:
             self.focus = None
             self.load(self.address_bar)
 
-    def _find_inputs(self, node, out=None):
-        if out is None:
-            out = []
-        if not isinstance(node, Element):
-            return
-        if node.tag == "input" and "name" in node.attributes:
-            out.append(node)
-        for child in node.children:
-            self._find_inputs(child, out)
-        return out
-
     def _submit_form(self, node):
         while node and node.tag != "form":
             node = node.parent
         if not node:
             return
-        inputs = self._find_inputs(node) or []
+        inputs = find_inputs(node) or []
         body = ""
         for input in inputs:
             name = input.attributes["name"]
@@ -1040,6 +1041,9 @@ class Browser:
 
         draw_time = time.time()
         print(f"Total time: {draw_time - start_time:.3f}s")
+
+    def setup_js(self):
+        self.js = dukpy.JSInterpreter()
 
     def layout(self, nodes):
         self.document = DocumentLayout(nodes)
