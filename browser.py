@@ -172,16 +172,17 @@ def print_nodes(node, indent=0):
 
 
 def print_layout(layout, indent=0):
-    if isinstance(layout.node, Element) and layout.node.tag == "input":
-        print(" " * indent)
-        if isinstance(layout, DocumentLayout):
-            print("Document")
-        elif isinstance(layout, BlockLayout):
-            print("Block")
-        elif isinstance(layout, InlineLayout):
-            print("Inline")
-        print(layout.__dict__)
-        print(type(layout.node), layout.node.__dict__)
+    print(" " * indent)
+    if isinstance(layout, DocumentLayout):
+        print("Document")
+    elif isinstance(layout, BlockLayout):
+        print("Block")
+    elif isinstance(layout, InlineLayout):
+        print("Inline")
+    elif isinstance(layout, InputLayout):
+        print("Input")
+    print(layout.__dict__)
+    print(type(layout.node), layout.node.__dict__)
 
     if layout.children:
         for child in layout.children:
@@ -352,7 +353,7 @@ class ClassSelector:
 
 
 class IdSelector:
-    def __init__(self, tag) -> None:
+    def __init__(self, id) -> None:
         self.id = id
 
     def matches(self, node):
@@ -882,15 +883,33 @@ def find_layout(x, y, tree):
     return tree
 
 
-def find_inputs(node, out=None):
-    if out is None:
-        out = []
+def find_inputs(node, out: list):
     if not isinstance(node, Element):
-        return
+        return []
     if node.tag == "input" and "name" in node.attributes:
         out.append(node)
     for child in node.children:
         find_inputs(child, out)
+    return out
+
+
+def find_scripts(node, out: list):
+    if not isinstance(node, Element):
+        return []
+    if node.tag == "script" and "src" in node.attributes:
+        out.append(node.attributes["src"])
+    for child in node.children:
+        find_scripts(child, out)
+    return out
+
+
+def find_selected(node, sel, out):
+    if not isinstance(node, Element):
+        return []
+    if sel.matches(node):
+        out.append(node)
+    for child in node.children:
+        find_selected(child, sel, out)
     return out
 
 
@@ -911,6 +930,8 @@ class Browser:
         )
         self.canvas.pack()
         self.url = ""
+        self.rules = []
+        self.nodes = None
 
         self.history = []
         self.focus = None
@@ -946,6 +967,13 @@ class Browser:
             if not obj:
                 return
             node = obj.node
+            handled = False
+            current = node
+            while current:
+                handled = self._dispatch_event("click", current) or handled
+                current = current.parent
+            if handled:
+                return
             while node:
                 if isinstance(node, Text):
                     pass
@@ -993,6 +1021,10 @@ class Browser:
                 return
             self._append_character(e.char)
 
+        # Trigger the change event
+        if self.focus != self.FOCUS_EL.ADDRESS_BAR:
+            self._dispatch_event("change", self.focus_el)
+
         self.layout(self.document.node)
 
     def _press_enter(self, e):
@@ -1000,12 +1032,59 @@ class Browser:
             self.focus = None
             self.load(self.address_bar)
 
+    def setup_js(self):
+        self.js = dukpy.JSInterpreter()
+        self.node_to_handle = {}
+        self.handle_to_node = {}
+        self.js.export_function("log", print)
+        self.js.export_function("querySelectorAll", self._js_querySelectorAll)
+        self.js.export_function("getAttribute", self._js_getAttribute)
+        self.js.export_function("innerHTML", self._js_innerHTML)
+
+        with open("runtime.js") as f:
+            self.js.evaljs(f.read())
+
+    def _js_innerHTML(self, handle, s):
+        doc = HTMLParser("<html><body>" + s + "</body></html>").parse()
+        new_nodes = doc.children[0].children
+        elt = self.handle_to_node[handle]
+        elt.children = new_nodes
+        for child in elt.children:
+            child.parent = elt
+
+    def _js_getAttribute(self, handle, attr):
+        elt = self.handle_to_node[handle]
+        return elt.attributes.get(attr, None)
+
+    def _js_querySelectorAll(self, sel):
+        selector, _ = CSSParser(sel + "{").selector(0)
+        nodes = find_selected(self.nodes, selector, [])
+        return [self._make_handle(node) for node in nodes]
+
+    def _dispatch_event(self, type, elt):
+        handle = self.node_to_handle.get(elt, -1)
+        do_default = self.js.evaljs(f'__runHandlers({handle}, "{type}")')
+        return not do_default
+
+    def _make_handle(self, elt):
+        if elt not in self.node_to_handle:
+            handle = len(self.node_to_handle)
+            self.node_to_handle[elt] = handle
+            self.handle_to_node[handle] = elt
+        else:
+            handle = self.node_to_handle[elt]
+        return handle
+
     def _submit_form(self, node):
         while node and node.tag != "form":
             node = node.parent
         if not node:
             return
-        inputs = find_inputs(node) or []
+
+        if self._dispatch_event("submit", node):
+            return
+
+        inputs = find_inputs(node, [])
         body = ""
         for input in inputs:
             name = input.attributes["name"]
@@ -1025,30 +1104,35 @@ class Browser:
 
         url_obj = URL(url)
         _, body = url_obj.request(payload)
-        nodes = HTMLParser(body).parse()
+        self.nodes = HTMLParser(body).parse()
 
-        rules = []
-
-        for link in find_links(nodes, []):
+        for link in find_links(self.nodes, []):
             _, body = URL(relative_url(link, url)).request()
-            rules.extend(CSSParser(body).parse())
+            self.rules.extend(CSSParser(body).parse())
 
-        rules.sort(key=lambda x: x[0].priority())
-        rules.reverse()
-        style(nodes, rules)
+        self.rules.sort(key=lambda x: x[0].priority())
+        self.rules.reverse()
 
-        self.layout(nodes)
+        self.setup_js()
+
+        scripts = find_scripts(self.nodes, [])
+        for script in scripts:
+            _, body = URL(relative_url(script, url)).request()
+            try:
+                print("Script returned: ", self.js.evaljs(body))
+            except dukpy.JSRuntimeError as e:
+                print("Script", script, "crashed", e)
+
+        self.layout(self.nodes)
 
         draw_time = time.time()
         print(f"Total time: {draw_time - start_time:.3f}s")
 
-    def setup_js(self):
-        self.js = dukpy.JSInterpreter()
-
     def layout(self, nodes):
+        style(nodes, self.rules)
         self.document = DocumentLayout(nodes)
         self.document.layout()
-        # print_layout(self.document)
+        print_layout(self.document)
         self.display_list = self.document.get_draw()
         self.render()
         self.max_y = self.document.h - HEIGHT
